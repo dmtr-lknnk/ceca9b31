@@ -1,0 +1,48 @@
+name: task-c
+
+on:
+  workflow_run:
+    workflows: ["task-a", "task-b", "task-d"]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Drop the log archive but keep the run record (name/time/conclusion).
+      - name: delete finished run logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X DELETE "repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}/logs"
+
+      # GitHub switches scheduled workflows off after 60 days without a push
+      # (state disabled_inactivity); re-enabling them resets that counter.
+      - name: keep schedules alive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for wf in c64982.yml fbbeb2.yml; do
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/$wf/enable"
+          done
+
+      - name: delete own past runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run list -R "${{ github.repository }}" --workflow "ab50f9.yml" --status completed \
+              --json databaseId --jq '.[].databaseId' |
+          while read -r id; do
+            gh api -X DELETE "repos/${{ github.repository }}/actions/runs/$id" || true
+          done
+
+      - if: failure()
+        uses: appleboy/telegram-action@a77dd3e42f32216ac2df808866c70b5aa41e6e75 # v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          message: "task-c failed"

@@ -1,0 +1,80 @@
+name: task-d
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "hold duration in minutes"
+        required: false
+        default: "120"
+
+concurrency:
+  group: task-d
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: prep
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq tinyproxy
+          cat <<'CONF' | sudo tee /etc/tinyproxy/tinyproxy.conf > /dev/null
+          User nobody
+          Group nogroup
+          Port 8890
+          Listen 127.0.0.1
+          Timeout 600
+          MaxClients 100
+          Allow 127.0.0.1
+          ConnectPort 443
+          ConnectPort 80
+          CONF
+          sudo systemctl restart tinyproxy
+          for i in 1 2 3 4 5; do nc -z 127.0.0.1 8890 && break; sleep 1; done
+          nc -z 127.0.0.1 8890 || exit 1
+
+      - name: check
+        run: |
+          echo "egress: $(curl -s --max-time 20 -x http://127.0.0.1:8890 https://api.ipify.org)"
+
+      - name: link
+        env:
+          SSH_KEY: ${{ secrets.TUNNEL_SSH_KEY }}
+          KNOWN: ${{ secrets.SERVER_KNOWN_HOSTS }}
+          HOST: ${{ secrets.SERVER_HOST }}
+          PORT: ${{ secrets.SERVER_PORT }}
+          USER: ${{ secrets.SERVER_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/tunnel_key
+          chmod 600 ~/.ssh/tunnel_key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          ssh -f -N -R 127.0.0.1:8890:127.0.0.1:8890 \
+              -i ~/.ssh/tunnel_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+              -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes \
+              -p "$PORT" "$USER@$HOST"
+
+      - name: hold
+        env:
+          MINUTES: ${{ github.event.inputs.minutes }}
+        run: |
+          case "$MINUTES" in
+            ''|*[!0-9]*) echo "bad input"; exit 1 ;;
+          esac
+          [ "$MINUTES" -ge 1 ] && [ "$MINUTES" -le 340 ] || { echo "out of range"; exit 1; }
+          sleep $(( MINUTES * 60 ))
+
+      - name: done
+        if: always()
+        run: |
+          pkill -f "ssh -f -N -R 127.0.0.1:8890" || true
+          shred -u ~/.ssh/tunnel_key 2>/dev/null || rm -f ~/.ssh/tunnel_key
+
+      - if: failure()
+        uses: appleboy/telegram-action@a77dd3e42f32216ac2df808866c70b5aa41e6e75 # v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          message: "task-d failed"

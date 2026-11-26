@@ -1,0 +1,74 @@
+name: task-b
+
+on:
+  schedule:
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: task-b
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: prep
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq tinyproxy
+          cat <<'CONF' | sudo tee /etc/tinyproxy/tinyproxy.conf > /dev/null
+          User nobody
+          Group nogroup
+          Port 8889
+          Listen 127.0.0.1
+          Timeout 600
+          Allow 127.0.0.1
+          ConnectPort 443
+          CONF
+          sudo systemctl restart tinyproxy
+          for i in 1 2 3 4 5; do nc -z 127.0.0.1 8889 && break; sleep 1; done
+          nc -z 127.0.0.1 8889 || exit 1
+
+      - name: link
+        env:
+          SSH_KEY: ${{ secrets.TUNNEL_SSH_KEY }}
+          KNOWN: ${{ secrets.SERVER_KNOWN_HOSTS }}
+          HOST: ${{ secrets.SERVER_HOST }}
+          PORT: ${{ secrets.SERVER_PORT }}
+          USER: ${{ secrets.SERVER_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/tunnel_key
+          chmod 600 ~/.ssh/tunnel_key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          ssh -f -N -R 127.0.0.1:8889:127.0.0.1:8889 \
+              -i ~/.ssh/tunnel_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+              -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes \
+              -p "$PORT" "$USER@$HOST"
+
+      - name: exec
+        env:
+          SSH_KEY: ${{ secrets.EXEC_SSH_KEY_B }}
+          KNOWN: ${{ secrets.SERVER_KNOWN_HOSTS }}
+          HOST: ${{ secrets.SERVER_HOST }}
+          PORT: ${{ secrets.SERVER_PORT }}
+          USER: ${{ secrets.SERVER_USER }}
+        run: |
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/exec_key
+          chmod 600 ~/.ssh/exec_key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/exec_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -p "$PORT" "$USER@$HOST"
+
+      - name: done
+        if: always()
+        run: |
+          pkill -f "ssh -f -N -R 127.0.0.1:8889" || true
+          shred -u ~/.ssh/tunnel_key ~/.ssh/exec_key 2>/dev/null || rm -f ~/.ssh/tunnel_key ~/.ssh/exec_key
+
+      - if: failure()
+        uses: appleboy/telegram-action@a77dd3e42f32216ac2df808866c70b5aa41e6e75 # v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          message: "task-b failed"
